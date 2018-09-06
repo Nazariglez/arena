@@ -1,0 +1,6 @@
+[workspace]
+
+members = [
+    "arena_core",
+    "arena_bin",
+]
