@@ -1,7 +1,11 @@
 extern crate arena_core;
+#[macro_use] extern crate serde_derive;
+#[macro_use] extern crate serde_json;
+
 
 use arena_core::*;
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct MyGameRoom {
     value: i32 //dummy
 }
