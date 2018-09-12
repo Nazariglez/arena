@@ -1,18 +1,34 @@
 extern crate arena_core;
+extern crate serde;
 #[macro_use] extern crate serde_derive;
 #[macro_use] extern crate serde_json;
 
 
 use arena_core::*;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct MyGameRoom {
-    value: i32 //dummy
+#[derive(Serialize)]
+struct State1 {
+    value: i32
 }
 
-impl Room for MyGameRoom {}
+impl State for State1 {
+    fn to_json(&self) -> JsonValue {
+        json!(self)
+    }
 
-fn main() {
-    let mut s = Server::new();
-    s.add("my_room", Box::new(MyGameRoom {value: 10}));
+    fn on_create(&mut self) {
+        self.value = 2000;
+    }
+}
+
+pub fn main() {
+    run(|| {
+        let mut server = Server::new();
+        server.add_room("my_room1", Room::with_state(Box::new(State1 {value: 20})));
+        server.to_json();
+        server.remove_room("my_room1");
+        server.to_json();
+        
+        server
+    });
 }
