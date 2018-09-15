@@ -1,6 +1,16 @@
-[workspace]
+[package]
+name = "arena"
+version = "0.1.0"
+authors = ["Nazarí González <nazari.nz@gmail.com>"]
 
+[dependencies]
+arena_core = { path = "./arena_core" }
+serde = "1.0.76"
+serde_derive = "1.0.76"
+serde_json = "1.0.27"
+
+
+[workspace]
 members = [
     "arena_core",
-    "arena_bin",
 ]
