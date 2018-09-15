@@ -11,4 +11,6 @@ lazy_static = "1.1.0"
 downcast-rs = "1.0.3"
 json-patch = "0.2.2"
 nanoid = "0.2.0"
+crossbeam-channel = "0.2.5"
+parking_lot = "0.6.4"
 

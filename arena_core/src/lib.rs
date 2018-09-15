@@ -1,6 +1,8 @@
 extern crate serde;
 extern crate json_patch;
 extern crate nanoid;
+extern crate crossbeam_channel;
+extern crate parking_lot;
 #[macro_use] extern crate serde_derive;
 #[macro_use] extern crate serde_json;
 #[macro_use] extern crate lazy_static;
@@ -13,35 +15,133 @@ use std::any::Any;
 use std::sync::Arc;
 use std::sync::{Mutex, RwLock};
 use json_patch::diff;
+use crossbeam_channel as channel;
 
 pub use serde_json::{Value as JsonValue};
 
 lazy_static! {
-    static ref SERVER: Arc<RwLock<Server>> = Arc::new(RwLock::new(Server::new()));
+    static ref SERVER: Arc<RwLock<Arena>> = Arc::new(RwLock::new(Arena::new()));
+}
+
+
+#[derive(Debug)]
+enum Message {
+    OpenConnection(Connection),
+    CloseConection(Connection),
+    MsgIn(String),
+    MsgOut(String)
+}
+
+struct ArenaBridge {
+    in_recv: channel::Receiver<Message>,
+    in_send: channel::Sender<Message>,
+    out_recv: channel::Receiver<Message>,
+    out_send: channel::Sender<Message>
+}
+
+impl ArenaBridge {
+    fn new() -> ArenaBridge {
+        let (in_send, in_recv) = channel::bounded(0);
+        let (out_send, out_recv) = channel::bounded(0);
+
+        ArenaBridge {
+            in_recv: in_recv,
+            in_send: in_send,
+            out_recv: out_recv,
+            out_send: out_send
+        }
+    }
+
+    fn send(&self, msg: Message) {
+        self.in_send.send(msg);
+    }
+
+    fn listen(&self) -> &channel::Receiver<Message> {
+        &self.out_recv
+    }
+
+    fn queue_msg(&self, msg: Message) {
+        self.out_send.send(msg);
+    }
+
+    fn run<F: Fn(Message)>(&self, handler: F) {
+        for msg in &self.in_recv {
+            println!("{:?}", msg);
+            handler(msg);
+        }
+    }
 }
 
 //todo rename to octopus? or other thing because arena seems to be already used
 
-pub fn get_server<F: FnOnce(&mut Server)>(handler: F) {
+pub fn get<F: FnOnce(&mut Arena)>(handler: F) {
     let mut s = SERVER.write().unwrap();
     handler(&mut s);
 }
 
-pub struct Server {
+pub struct Arena {
+    main_room: Option<String>,
+
     rooms: HashMap<String, Room>,
-    states: HashMap<String, Box<State>>
+    states: HashMap<String, Box<State>>,
+
+    connections: HashMap<String, Connection>
+
+    //bridge: ArenaBridge
 }
 
-impl Server {
-    pub fn new() -> Server {
-        Server {
+impl Arena {
+    pub fn new() -> Arena {
+        Arena {
+            main_room: None,
+
             rooms: HashMap::new(),
-            states: HashMap::new()
+            states: HashMap::new(),
+
+            connections: HashMap::new(),
+
+            //bridge: ArenaBridge::new()
         }
     }
 
-    pub fn run(&self) {
+    pub fn run(&mut self) {
+        if !self.rooms.contains_key("main_room") {
+            self.add("main_room", Box::new(EmptyState));
+        }
+    }
+
+    /*pub fn run(&self) {
         println!("run");
+        self.bridge.run(|msg| {
+            println!("-> {:?}", msg);
+        });
+    }*/
+
+    pub fn main_room(&self) -> &Option<String> {
+        &self.main_room
+    }
+
+    pub fn set_main_room(&mut self, name: &str) -> Result<(), String> {
+        if !self.rooms.contains_key(name) {
+            return Err(format!("Not found the room {}", name));
+        }
+
+        self.main_room = Some(name.to_string());
+        Ok(())
+    }
+
+    pub fn add_connection(&mut self, conn: Connection) -> Result<(), String> {
+        match self.main_room {
+            Some(ref m) => {
+                if let Some(mut r) = self.rooms.get_mut(m) {
+                    r.add_conn(conn);
+                    return Ok(());
+                }
+
+                Err(format!("Main room {} doesn't exists.", m))
+            },
+            _ => Err("Not found a main room.".to_string())
+        }
     }
 
     pub fn add(&mut self, name: &str, state: Box<State>) -> Result<(), String> {
@@ -76,6 +176,13 @@ impl Server {
 
     pub fn remove(&mut self, name: &str) -> Option<Box<State>> {
         if let (Some(mut r), Some(mut s)) = (self.rooms.remove(name), self.states.remove(name)) {
+            let m = self.main_room.clone()
+                .unwrap_or("".to_string());
+
+            if m == name {
+                self.main_room = None;
+            }
+
             s.on_destroy(&mut r);
             return Some(s);
         }
@@ -83,6 +190,7 @@ impl Server {
         None
     }
 }
+
 
 pub struct Room {
     id: String,
@@ -108,6 +216,7 @@ impl Room {
     }
 
     fn add_conn(&mut self, conn: Connection) {
+        println!("connection {} added on room: {}:{}", conn.id, self.name, self.id);
         //todo check collision?
         let id = conn.id.clone();
         self.connections.insert(id, conn);
@@ -147,6 +256,7 @@ impl Room {
 }
 
 
+#[derive(Debug)]
 pub struct Connection {
     id: String
 }
@@ -155,6 +265,12 @@ impl Connection {
     pub fn new() -> Connection {
         Connection {
             id: nanoid::simple()
+        }
+    }
+
+    pub fn with_id(id: &str) -> Connection {
+        Connection {
+            id: id.to_string()
         }
     }
 }
@@ -181,3 +297,12 @@ pub trait State: Downcast + Send + Sync {
 }
 
 impl_downcast!(State);
+
+
+#[derive(Serialize)]
+struct EmptyState;
+impl State for EmptyState {
+    fn to_json(&self) -> JsonValue {
+        json!(self)
+    }
+}

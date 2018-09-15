@@ -1,10 +1,11 @@
 extern crate arena_core;
+extern crate arena_net;
 extern crate serde;
 #[macro_use] extern crate serde_derive;
 #[macro_use] extern crate serde_json;
 
-
-use arena_core::{get_server, State, Room, JsonValue};
+use arena_core::{Arena, get, State, Room, JsonValue};
+use std::thread;
 
 #[derive(Serialize)]
 struct State1 {
@@ -16,7 +17,7 @@ impl State for State1 {
         json!(self)
     }
 
-    fn on_init(&mut self, room: &mut Room) {
+    /*fn on_init(&mut self, room: &mut Room) {
         println!("on init {}:{}", room.name(), room.id());
         self.value = 2000;
         room.sync(self);
@@ -24,13 +25,23 @@ impl State for State1 {
 
     fn on_destroy(&mut self, room: &mut Room) {
         println!("on destroy {}:{}", room.name(), room.id());
-    }
+    }*/
 }
 
 pub fn main() {
-    get_server(|server|{
-        server.add("my_room1", Box::new(State1 {value: 20}));
-        server.remove("my_room1");
-    });
+    let mut server = Arena::new();
+    //get(|server|{
+    server.add("my_room1", Box::new(State1 {value: 20}));
+    //server.remove("my_room1");
+    let res = server.set_main_room("my_room1");
+    println!("{:?}", res);
+
+    let res = server.add_connection(arena_core::Connection::new());
+    println!("{:?}", res);
+
+    server.run();
+
+    arena_net::run(8088);
+    //});
     //let mut server = Server::new();
 }
