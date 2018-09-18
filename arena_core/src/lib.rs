@@ -13,7 +13,7 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::any::Any;
 use std::sync::Arc;
-use std::sync::{Mutex, RwLock};
+use parking_lot::{Mutex, RwLock};
 use json_patch::diff;
 use crossbeam_channel as channel;
 
@@ -21,6 +21,7 @@ pub use serde_json::{Value as JsonValue};
 
 lazy_static! {
     static ref SERVER: Arc<RwLock<Arena>> = Arc::new(RwLock::new(Arena::new()));
+    static ref BRIGE: ArenaBridge = ArenaBridge::new();
 }
 
 
@@ -75,17 +76,44 @@ impl ArenaBridge {
 //todo rename to octopus? or other thing because arena seems to be already used
 
 pub fn get<F: FnOnce(&mut Arena)>(handler: F) {
-    let mut s = SERVER.write().unwrap();
+    let mut s = SERVER.write();
     handler(&mut s);
 }
 
-pub struct Arena {
-    main_room: Option<String>,
 
-    rooms: HashMap<String, Room>,
-    states: HashMap<String, Box<State>>,
-
+struct RoomContainer {
+    room: Room,
+    state: Box<State>,
     connections: HashMap<String, Connection>
+}
+
+impl RoomContainer {
+    pub fn new(name: &str, state: Box<State>) -> RoomContainer {
+        let json_val = state.to_json();
+        RoomContainer {
+            room: Room::new(name, json_val),
+            state: state,
+            connections: HashMap::new()
+        }
+    }
+
+    pub fn add_connection(&mut self, conn: Connection) {
+        self.room.add_conn(conn);
+    }
+
+    pub fn on_init(&mut self) {
+        self.state.on_init(&mut self.room);
+    }
+
+    pub fn on_destroy(&mut self) {
+        self.state.on_destroy(&mut self.room);
+    }
+}
+
+#[derive(Clone)]
+pub struct Arena {
+    main_room: Arc<RwLock<Option<String>>>,
+    containers: Arc<RwLock<HashMap<String, Mutex<RoomContainer>>>>
 
     //bridge: ArenaBridge
 }
@@ -93,48 +121,40 @@ pub struct Arena {
 impl Arena {
     pub fn new() -> Arena {
         Arena {
-            main_room: None,
-
-            rooms: HashMap::new(),
-            states: HashMap::new(),
-
-            connections: HashMap::new(),
+            main_room: Arc::new(RwLock::new(None)),
+            containers: Arc::new(RwLock::new(HashMap::new()))
 
             //bridge: ArenaBridge::new()
         }
     }
 
-    pub fn run(&mut self) {
-        if !self.rooms.contains_key("main_room") {
-            self.add("main_room", Box::new(EmptyState));
-        }
+    pub fn room_len(&self) -> usize {
+        self.containers.read().len()
     }
 
-    /*pub fn run(&self) {
-        println!("run");
-        self.bridge.run(|msg| {
-            println!("-> {:?}", msg);
-        });
-    }*/
+    pub fn run(&mut self) {
+        
+    }
 
-    pub fn main_room(&self) -> &Option<String> {
-        &self.main_room
+    pub fn main_room(&self) -> Option<String> {
+        self.main_room.read().clone()
     }
 
     pub fn set_main_room(&mut self, name: &str) -> Result<(), String> {
-        if !self.rooms.contains_key(name) {
+        if !self.containers.read().contains_key(name) {
             return Err(format!("Not found the room {}", name));
         }
 
-        self.main_room = Some(name.to_string());
+        *self.main_room.write() = Some(name.to_string());
         Ok(())
     }
 
     pub fn add_connection(&mut self, conn: Connection) -> Result<(), String> {
-        match self.main_room {
+        match self.main_room.read().clone() {
             Some(ref m) => {
-                if let Some(mut r) = self.rooms.get_mut(m) {
-                    r.add_conn(conn);
+                if let Some(c) = self.containers.read().get(m) {
+                    let mut container = c.lock();
+                    container.add_connection(conn);
                     return Ok(());
                 }
 
@@ -145,49 +165,32 @@ impl Arena {
     }
 
     pub fn add(&mut self, name: &str, state: Box<State>) -> Result<(), String> {
-        if self.rooms.contains_key(name) {
+        let mut containers = self.containers.write();
+        if containers.contains_key(name) {
             return Err(format!("The room '{}' already exists.", name));
         }
 
-        let val = state.to_json();
-        self.states.insert(name.to_string(), state);
-        self.rooms.insert(name.to_string(), Room::new(name, val));
+        containers.insert(name.to_string(), Mutex::new(RoomContainer::new(name, state)));
+        drop(containers);
 
-        if let (Some(s), Some(r)) = (self.states.get_mut(name), self.rooms.get_mut(name)) {
-            s.on_init(r);
+        if let Some(c) = self.containers.read().get(name) {
+            let mut container = c.lock();
+            container.on_init();
         }
 
         Ok(())
     }
 
-    pub fn get<T: State>(&self, name: &str) -> Option<&T> {
-        match self.states.get(name) {
-            Some(s) => s.downcast_ref::<T>(),
-            _ => None
+    pub fn remove(&mut self, name: &str) -> Result<(), String> {
+        let c = self.containers.write().remove(name);
+        match c {
+            Some(c) => {
+                let mut container = c.lock();
+                container.on_destroy();
+                 Ok(())
+            },
+            _ => Err("Invalid name.".to_string())
         }
-    }
-
-    pub fn get_mut<T: State>(&mut self, name: &str) -> Option<&mut T> {
-        match self.states.get_mut(name) {
-            Some(s) => s.downcast_mut::<T>(),
-            _ => None
-        }
-    }
-
-    pub fn remove(&mut self, name: &str) -> Option<Box<State>> {
-        if let (Some(mut r), Some(mut s)) = (self.rooms.remove(name), self.states.remove(name)) {
-            let m = self.main_room.clone()
-                .unwrap_or("".to_string());
-
-            if m == name {
-                self.main_room = None;
-            }
-
-            s.on_destroy(&mut r);
-            return Some(s);
-        }
-
-        None
     }
 }
 
