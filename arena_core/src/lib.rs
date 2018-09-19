@@ -26,14 +26,15 @@ lazy_static! {
 
 
 #[derive(Debug)]
-enum Message {
+pub enum Message {
     OpenConnection(Connection),
     CloseConection(Connection),
     MsgIn(String),
     MsgOut(String)
 }
 
-struct ArenaBridge {
+#[derive(Debug, Clone)]
+pub struct ArenaBridge {
     in_recv: channel::Receiver<Message>,
     in_send: channel::Sender<Message>,
     out_recv: channel::Receiver<Message>,
@@ -53,19 +54,19 @@ impl ArenaBridge {
         }
     }
 
-    fn send(&self, msg: Message) {
+    pub fn send(&self, msg: Message) {
         self.in_send.send(msg);
     }
 
-    fn listen(&self) -> &channel::Receiver<Message> {
+    pub fn listen(&self) -> &channel::Receiver<Message> {
         &self.out_recv
     }
 
-    fn queue_msg(&self, msg: Message) {
+    pub fn queue_msg(&self, msg: Message) {
         self.out_send.send(msg);
     }
 
-    fn run<F: Fn(Message)>(&self, handler: F) {
+    pub fn run<F: Fn(Message)>(&self, handler: F) {
         for msg in &self.in_recv {
             println!("{:?}", msg);
             handler(msg);
@@ -80,51 +81,58 @@ pub fn get<F: FnOnce(&mut Arena)>(handler: F) {
     handler(&mut s);
 }
 
-
+#[derive(Debug)]
 struct RoomContainer {
     room: Room,
     state: Box<State>,
-    connections: HashMap<String, Connection>
+    server: Arena,
 }
 
 impl RoomContainer {
-    pub fn new(name: &str, state: Box<State>) -> RoomContainer {
+    pub fn new(name: &str, state: Box<State>, server: Arena) -> RoomContainer {
         let json_val = state.to_json();
         RoomContainer {
             room: Room::new(name, json_val),
             state: state,
-            connections: HashMap::new()
+            server: server,
         }
     }
 
-    pub fn add_connection(&mut self, conn: Connection) {
+    pub fn add_connection(&mut self, conn: Connection) -> Result<(), String> {
+        if let Some(max) = self.room.max_connections {
+            if max >= self.room.connections.len() {
+                return Err("Room full of connections.".to_string());
+            }
+        }
+
         self.room.add_conn(conn);
+        Ok(())
     }
 
     pub fn on_init(&mut self) {
-        self.state.on_init(&mut self.room);
+        self.state.on_init(&mut self.room, &mut self.server);
     }
 
     pub fn on_destroy(&mut self) {
-        self.state.on_destroy(&mut self.room);
+        self.state.on_destroy(&mut self.room, &mut self.server);
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Arena {
     main_room: Arc<RwLock<Option<String>>>,
-    containers: Arc<RwLock<HashMap<String, Mutex<RoomContainer>>>>
+    containers: Arc<RwLock<HashMap<String, Mutex<RoomContainer>>>>,
 
-    //bridge: ArenaBridge
+    pub bridge: ArenaBridge
 }
 
 impl Arena {
     pub fn new() -> Arena {
         Arena {
             main_room: Arc::new(RwLock::new(None)),
-            containers: Arc::new(RwLock::new(HashMap::new()))
+            containers: Arc::new(RwLock::new(HashMap::new())),
 
-            //bridge: ArenaBridge::new()
+            bridge: ArenaBridge::new()
         }
     }
 
@@ -132,8 +140,10 @@ impl Arena {
         self.containers.read().len()
     }
 
-    pub fn run(&mut self) {
-        
+    pub fn run(&self) {
+        for msg in self.bridge.in_recv.clone() {
+            println!("{:?}", msg);
+        }
     }
 
     pub fn main_room(&self) -> Option<String> {
@@ -170,7 +180,8 @@ impl Arena {
             return Err(format!("The room '{}' already exists.", name));
         }
 
-        containers.insert(name.to_string(), Mutex::new(RoomContainer::new(name, state)));
+        let server = self.clone();
+        containers.insert(name.to_string(), Mutex::new(RoomContainer::new(name, state, server)));
         drop(containers);
 
         if let Some(c) = self.containers.read().get(name) {
@@ -194,13 +205,14 @@ impl Arena {
     }
 }
 
-
+#[derive(Debug)]
 pub struct Room {
     id: String,
     name: String,
+    pub max_connections: Option<usize>,
     connections: HashMap<String, Connection>,
     states: Vec<JsonValue>,
-    state_limit: usize,
+    state_limit: usize
 }
 
 impl Room {
@@ -212,6 +224,7 @@ impl Room {
         Room {
             id: nanoid::simple(),
             name: name.to_string(),
+            max_connections: None,
             connections: HashMap::new(),
             states: vec![state],
             state_limit: state_limit,
@@ -279,22 +292,22 @@ impl Connection {
 }
 
 
-pub trait State: Downcast + Send + Sync {
+pub trait State: Downcast + Send + Sync + std::fmt::Debug {
     fn to_json(&self) -> JsonValue;  
 
-    fn on_init(&mut self, room: &mut Room) {
+    fn on_init(&mut self, room: &mut Room, server: &mut Arena) {
         println!("on init {}:{}", room.name(), room.id());
     }
 
-    fn on_destroy(&mut self, room: &mut Room) {
+    fn on_destroy(&mut self, room: &mut Room, server: &mut Arena) {
         println!("on destroy {}:{}", room.name(), room.id());
     }
 
-    fn on_update(&mut self, room: &mut Room) {
+    fn on_update(&mut self, room: &mut Room, server: &mut Arena) {
         println!("on update {}:{}", room.name(), room.id());
     }
 
-    fn before_sync(&mut self, conn: &mut Connection, _room: &mut Room) -> JsonValue {
+    fn before_sync(&mut self, conn: &mut Connection, _room: &mut Room, server: &mut Arena) -> JsonValue {
         json!({})
     }
 }
@@ -302,8 +315,8 @@ pub trait State: Downcast + Send + Sync {
 impl_downcast!(State);
 
 
-#[derive(Serialize)]
-struct EmptyState;
+#[derive(Debug, Serialize)]
+pub struct EmptyState;
 impl State for EmptyState {
     fn to_json(&self) -> JsonValue {
         json!(self)

@@ -4,38 +4,33 @@ extern crate serde;
 #[macro_use] extern crate serde_derive;
 #[macro_use] extern crate serde_json;
 
-use arena_core::{Arena, get, State, Room, JsonValue};
+use arena_core::{Arena, get, State, Room, JsonValue, Message, Connection};
 use std::thread;
 
-#[derive(Serialize)]
-    struct State1 {
-        value: i32,
+#[derive(Debug, Serialize)]
+struct State1 {
+    value: i32,
 
-        #[serde(skip_serializing)]
-        serv: Arena,
+    //#[serde(skip_serializing)]
+    //serv: Arena,
+}
+
+impl State for State1 {
+    fn to_json(&self) -> JsonValue {
+        json!(self)
     }
 
-    impl State for State1 {
-        fn to_json(&self) -> JsonValue {
-            json!(self)
-        }
+    fn on_init(&mut self, room: &mut Room, server: &mut Arena) {
+        println!("on init {}:{}:{:?}", room.name(), room.id(), room.max_connections);
+        self.value = 2000;
+        room.sync(self);
 
-        fn on_init(&mut self, room: &mut Room) {
-            println!("on init {}:{}", room.name(), room.id());
-            self.value = 2000;
-            room.sync(self);
-
-        }
-
-        fn on_destroy(&mut self, room: &mut Room) {
-            println!("on destroy {}:{}", room.name(), room.id());
-            let s = self.serv.clone();
-            self.serv.add("my_room2", Box::new(State1 {value: 30, serv: s.clone()}));
-            self.serv.add("my_room3", Box::new(State1 {value: 30, serv: s.clone()}));
-            self.serv.add("my_room4", Box::new(State1 {value: 30, serv: s.clone()}));
-            self.serv.add("my_room5", Box::new(State1 {value: 30, serv: s}));
-        }
     }
+
+    fn on_destroy(&mut self, room: &mut Room, server: &mut Arena) {
+        println!("on destroy {}:{}", room.name(), room.id());
+    }
+}
 
 
 pub fn main() {
@@ -43,7 +38,7 @@ pub fn main() {
 
     let ss = server.clone();
     //get(|server|{
-    server.add("my_room1", Box::new(State1 {value: 20, serv: ss}));
+    server.add("my_room1", Box::new(State1 {value: 20}));
     println!("len -> {}", server.room_len());
     server.remove("my_room1");
     let res = server.set_main_room("my_room1");
@@ -53,6 +48,14 @@ pub fn main() {
     println!("{:?}", res);
 
     println!("len -> {}", server.room_len());
+    let mut s = server.clone();
+    thread::spawn(move || {
+        for i in 0..10 {
+            s.bridge.send(Message::OpenConnection(Connection::new()));
+            thread::sleep_ms(1000);
+        }
+    });
+
     server.run();
 
     arena_net::run(8088);
