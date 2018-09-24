@@ -12,7 +12,6 @@ extern crate parking_lot;
 use downcast_rs::Downcast;
 use serde::Serialize;
 use std::collections::HashMap;
-use std::any::Any;
 use std::sync::Arc;
 use parking_lot::{Mutex, RwLock};
 use json_patch::diff;
@@ -126,11 +125,6 @@ impl RoomContainer {
     }
 }
 
-enum ContainerEvent {
-    OnInit(String),
-    OnDestroy(String)
-}
-
 #[derive(Debug, Clone)]
 pub struct Arena {
     main_room: Arc<RwLock<Option<String>>>,
@@ -139,16 +133,12 @@ pub struct Arena {
     in_recv: channel::Receiver<Message>,
     in_send: channel::Sender<Message>,
 
-    evt_recv: channel::Receiver<ContainerEvent>,
-    evt_send: channel::Sender<ContainerEvent>,
-
     pub bridge: ArenaBridge
 }
 
 impl Arena {
     pub fn new() -> Arena {
         let (in_send, in_recv) = channel::unbounded();
-        let (evt_send, evt_recv) = channel::unbounded();
 
         Arena {
             main_room: Arc::new(RwLock::new(None)),
@@ -156,9 +146,6 @@ impl Arena {
 
             in_recv: in_recv,
             in_send: in_send,
-
-            evt_recv: evt_recv,
-            evt_send: evt_send,
 
             bridge: ArenaBridge::new()
         }
@@ -318,7 +305,7 @@ impl Room {
         //notify state
     }
 
-    pub fn sync_connection(&mut self, state: &State) {
+    pub fn sync_connection(&mut self, _state: &State) {
         //todo
     }
 
@@ -369,23 +356,23 @@ impl Connection {
 pub trait State: Downcast + Send + Sync + std::fmt::Debug {
     fn to_json(&self) -> JsonValue;  
 
-    fn on_init(&mut self, room: &mut Room, server: &mut Arena) {
+    fn on_init(&mut self, room: &mut Room, _server: &mut Arena) {
         println!("on init {}:{}", room.name(), room.id());
     }
 
-    fn on_destroy(&mut self, room: &mut Room, server: &mut Arena) {
+    fn on_destroy(&mut self, room: &mut Room, _server: &mut Arena) {
         println!("on destroy {}:{}", room.name(), room.id());
     }
 
-    fn on_update(&mut self, room: &mut Room, server: &mut Arena) {
+    fn on_update(&mut self, room: &mut Room, _server: &mut Arena) {
         println!("on update {}:{}", room.name(), room.id());
     }
 
-    fn on_open_connection(&mut self, connection_id: &str, room: &mut Room, server: &mut Arena) {
+    fn on_open_connection(&mut self, connection_id: &str, room: &mut Room, _server: &mut Arena) {
         println!("on open connection [{}] {}:{}", connection_id, room.name(), room.id());
     }
 
-    fn before_sync(&mut self, conn: &mut Connection, _room: &mut Room, server: &mut Arena) -> JsonValue {
+    fn before_sync(&mut self, _conn: &mut Connection, _room: &mut Room, _server: &mut Arena) -> JsonValue {
         json!({})
     }
 }

@@ -6,7 +6,7 @@ extern crate serde;
 #[macro_use] extern crate log;
 extern crate env_logger;
 
-use arena_core::{Arena, get, State, Room, JsonValue, Message, Connection, EmptyState};
+use arena_core::{Arena, State, Room, JsonValue, Message, Connection, EmptyState};
 use std::thread;
 
 #[derive(Debug, Serialize)]
@@ -29,11 +29,13 @@ impl State for State1 {
         room.sync(self);
 
         println!("here1-");
-        server.add("game_room", Box::new(EmptyState)); 
+        if let Err(e) = server.add("game_room", Box::new(EmptyState)) {
+            println!("ERROR: {}", e);
+        }
         println!("here2");
     }
 
-    fn on_destroy(&mut self, room: &mut Room, server: &mut Arena) {
+    fn on_destroy(&mut self, room: &mut Room, _server: &mut Arena) {
         println!("on destroy {}:{}", room.name(), room.id());
     }
 
@@ -54,17 +56,17 @@ impl State for State1 {
 
 pub fn main() {
     let mut server = Arena::new();
-
-    let ss = server.clone();
     //get(|server|{
-    server.add("my_room1", Box::new(State1 {value: 20}));
+    if let Err(e) = server.add("my_room1", Box::new(State1 {value: 20})) {
+        println!("ERROR: {}", e);
+    }
     println!("len -> {}", server.room_len());
     //server.remove("my_room1");
     let res = server.set_main_room("my_room1");
     println!("{:?}", res);
 
     println!("len -> {}", server.room_len());
-    let mut s = server.clone();
+    let s = server.clone();
     thread::spawn(move || {
         for i in 0..10 {
             s.send(Message::OpenConnection(Connection::new()));

@@ -5,7 +5,6 @@ extern crate nanoid;
 
 use actix::*;
 use actix_web::*;
-use arena_core::Connection;
 
 fn init_ws(req: &HttpRequest) -> Result<HttpResponse, Error> {
     ws::start(req, WsConnection::new())
