@@ -7,6 +7,7 @@ extern crate parking_lot;
 #[macro_use] extern crate serde_json;
 #[macro_use] extern crate lazy_static;
 #[macro_use] extern crate downcast_rs;
+#[macro_use] extern crate log;
 
 use downcast_rs::Downcast;
 use serde::Serialize;
@@ -24,11 +25,13 @@ lazy_static! {
     static ref BRIGE: ArenaBridge = ArenaBridge::new();
 }
 
+type ConnId = String;
 
 #[derive(Debug)]
 pub enum Message {
     OpenConnection(Connection),
-    CloseConection(Connection),
+    DenyConection(ConnId, String),
+    CloseConnection(String),
     MsgIn(String),
     MsgOut(String)
 }
@@ -100,13 +103,18 @@ impl RoomContainer {
 
     pub fn add_connection(&mut self, conn: Connection) -> Result<(), String> {
         if let Some(max) = self.room.max_connections {
-            if max >= self.room.connections.len() {
+            println!("PP -> {}, {}", max, self.room.connections.len());
+            if self.room.connections.len() >= max {
                 return Err("Room full of connections.".to_string());
             }
         }
 
         self.room.add_conn(conn);
         Ok(())
+    }
+
+    pub fn on_open_connection(&mut self, id: &str) {
+        self.state.on_open_connection(id, &mut self.room, &mut self.server);
     }
 
     pub fn on_init(&mut self) {
@@ -118,19 +126,39 @@ impl RoomContainer {
     }
 }
 
+enum ContainerEvent {
+    OnInit(String),
+    OnDestroy(String)
+}
+
 #[derive(Debug, Clone)]
 pub struct Arena {
     main_room: Arc<RwLock<Option<String>>>,
-    containers: Arc<RwLock<HashMap<String, Mutex<RoomContainer>>>>,
+    containers: Arc<RwLock<HashMap<String, Arc<Mutex<RoomContainer>>>>>,
+
+    in_recv: channel::Receiver<Message>,
+    in_send: channel::Sender<Message>,
+
+    evt_recv: channel::Receiver<ContainerEvent>,
+    evt_send: channel::Sender<ContainerEvent>,
 
     pub bridge: ArenaBridge
 }
 
 impl Arena {
     pub fn new() -> Arena {
+        let (in_send, in_recv) = channel::unbounded();
+        let (evt_send, evt_recv) = channel::unbounded();
+
         Arena {
             main_room: Arc::new(RwLock::new(None)),
             containers: Arc::new(RwLock::new(HashMap::new())),
+
+            in_recv: in_recv,
+            in_send: in_send,
+
+            evt_recv: evt_recv,
+            evt_send: evt_send,
 
             bridge: ArenaBridge::new()
         }
@@ -140,9 +168,22 @@ impl Arena {
         self.containers.read().len()
     }
 
-    pub fn run(&self) {
-        for msg in self.bridge.in_recv.clone() {
+    pub fn send(&self, msg:Message) {
+        self.in_send.send(msg);
+    }
+
+    pub fn run(&mut self) {
+        for msg in &self.in_recv {
             println!("{:?}", msg);
+            //handle messages
+            match msg {
+                Message::OpenConnection(conn) => {
+                    if let Err(e) = self.add_connection(conn) {
+                        println!("Err: {}", e); //todo deny?
+                    }
+                },
+                _ => ()
+            }
         }
     }
 
@@ -159,34 +200,51 @@ impl Arena {
         Ok(())
     }
 
-    pub fn add_connection(&mut self, conn: Connection) -> Result<(), String> {
-        match self.main_room.read().clone() {
-            Some(ref m) => {
-                if let Some(c) = self.containers.read().get(m) {
-                    let mut container = c.lock();
-                    container.add_connection(conn);
-                    return Ok(());
-                }
-
-                Err(format!("Main room {} doesn't exists.", m))
-            },
+    fn add_connection(&mut self, conn: Connection) -> Result<(), String> {
+        let main = self.main_room.read().clone();
+        match main {
+            Some(m) => self.add_connection_to(&m, conn),
             _ => Err("Not found a main room.".to_string())
         }
     }
 
+    pub fn add_connection_to(&mut self, room: &str, conn: Connection) -> Result<(), String> {
+        let opt_container = self.containers.read().get(room)
+            .map(|c| c.clone());
+
+        match opt_container {
+            Some(c) => {
+                let mut container = c.lock();
+
+                let id = conn.id.clone();
+                container.add_connection(conn)?;
+                container.on_open_connection(&id);
+
+                Ok(())
+            },
+            _ => Err(format!("Room {} doesn't exists.", room))
+        }
+    }
+
     pub fn add(&mut self, name: &str, state: Box<State>) -> Result<(), String> {
-        let mut containers = self.containers.write();
-        if containers.contains_key(name) {
-            return Err(format!("The room '{}' already exists.", name));
+        {
+            let mut containers = self.containers.write();
+            if containers.contains_key(name) {
+                return Err(format!("The room '{}' already exists.", name));
+            }
+
+            let server = self.clone();
+            containers.insert(name.to_string(), Arc::new(Mutex::new(RoomContainer::new(name, state, server))));
         }
 
-        let server = self.clone();
-        containers.insert(name.to_string(), Mutex::new(RoomContainer::new(name, state, server)));
-        drop(containers);
+        //clone the container reference to dispatch events without 
+        //block the thread reading the container's list
+        let opt_container = self.containers.read().get(name)
+            .map(|c| c.clone());
 
-        if let Some(c) = self.containers.read().get(name) {
-            let mut container = c.lock();
-            container.on_init();
+        match opt_container {
+            Some(c) => c.lock().on_init(),
+            _ => ()
         }
 
         Ok(())
@@ -198,7 +256,7 @@ impl Arena {
             Some(c) => {
                 let mut container = c.lock();
                 container.on_destroy();
-                 Ok(())
+                Ok(())
             },
             _ => Err("Invalid name.".to_string())
         }
@@ -209,7 +267,7 @@ impl Arena {
 pub struct Room {
     id: String,
     name: String,
-    pub max_connections: Option<usize>,
+    max_connections: Option<usize>,
     connections: HashMap<String, Connection>,
     states: Vec<JsonValue>,
     state_limit: usize
@@ -220,6 +278,18 @@ impl Room {
         Room::with_limit(name, state, 100)
     }
 
+    pub fn set_max_connections(&mut self, amount: usize) {
+        self.max_connections = Some(amount);
+    }
+
+    pub fn disable_max_connections(&mut self) {
+        self.max_connections = None;
+    }
+
+    pub fn get_max_connections(&self) -> Option<usize> {
+        self.max_connections
+    }
+ 
     fn with_limit(name: &str, state: JsonValue, state_limit: usize) -> Room {
         Room {
             id: nanoid::simple(),
@@ -237,6 +307,10 @@ impl Room {
         let id = conn.id.clone();
         self.connections.insert(id, conn);
         //notifiy state
+    }
+
+    pub fn get_conn(&mut self, id: &str) -> Option<&mut Connection> {
+        self.connections.get_mut(id)
     }
 
     fn remove_conn(&mut self, id: String) {
@@ -272,7 +346,7 @@ impl Room {
 }
 
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Connection {
     id: String
 }
@@ -305,6 +379,10 @@ pub trait State: Downcast + Send + Sync + std::fmt::Debug {
 
     fn on_update(&mut self, room: &mut Room, server: &mut Arena) {
         println!("on update {}:{}", room.name(), room.id());
+    }
+
+    fn on_open_connection(&mut self, connection_id: &str, room: &mut Room, server: &mut Arena) {
+        println!("on open connection [{}] {}:{}", connection_id, room.name(), room.id());
     }
 
     fn before_sync(&mut self, conn: &mut Connection, _room: &mut Room, server: &mut Arena) -> JsonValue {
