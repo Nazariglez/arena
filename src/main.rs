@@ -23,13 +23,37 @@ impl State for MainRoom {
         json!(self)
     }
 
+    fn to_sync(&self, _conn_id: &str) -> JsonValue {
+        self.to_json()
+    }
+
     fn on_open_connection(&mut self, conn: &str, room: &mut Room, server: &mut Arena) {
         println!("on open connection [{}] {}:{}", conn, room.kind(), room.id());
-        let conn = room.get_conn(&conn);
+        //find a waiting room or create one
+        let room_id = {
+            let mut id = String::from("");
+
+            for r in server.get_rooms_by_kind("game_room") {
+                let room = r.lock();
+                if !room.is_full() {
+                    id = room.id();
+                    break;
+                }
+            }
+
+            if id != "" {
+                id
+            } else {
+                println!("All game rooms are full, creating a new one...");
+                server.add("game_room", Box::new(GameRoom::new())).unwrap()
+            }
+        };
+
         //tic tac toe, create a new room for every two players
+        let conn = room.get_conn(&conn);
         match conn {
             Some(c) => {
-                if let Err(e) = server.add_connection_to("game_room", c.clone()) {
+                if let Err(e) = server.add_connection_to(&room_id, c.clone()) {
                     println!("ERROR adding connection {}", e);
                 }
             },
@@ -46,18 +70,32 @@ enum GameToken {
 }
 
 #[derive(Debug, Serialize)]
+enum GameState {
+    Waiting,
+    PlayingPlayer1,
+    PlayingPlayer2,
+    End
+}
+
+#[derive(Debug, Serialize)]
 struct GameRoom {
     board: [[GameToken; 3]; 3],
+    state: GameState,
+    players: Vec<String>,
 }
 
 impl GameRoom {
     pub fn new() -> GameRoom {
         GameRoom {
+            state: GameState::Waiting,
+
             board: [
                 [ GameToken::Empty, GameToken::Empty, GameToken::Empty ],
                 [ GameToken::Empty, GameToken::Empty, GameToken::Empty ],
                 [ GameToken::Empty, GameToken::Empty, GameToken::Empty ],
-            ]
+            ],
+
+            players: vec![]
         }
     }
 }
@@ -70,20 +108,36 @@ impl State for GameRoom {
     fn on_init(&mut self, room: &mut Room, _server: &mut Arena) {
         room.set_max_connections(2);
     }
+
+    fn on_open_connection(&mut self, connection_id: &str, room: &mut Room, _server: &mut Arena) {
+        self.players.push(connection_id.to_string());
+
+        if self.players.len() == 2 {
+            println!("Starting game {} with players [{} vs {}]", room.id(), self.players.get(0).unwrap(), self.players.get(1).unwrap());
+            self.state = GameState::PlayingPlayer1;
+        }
+    }
 }
 
 
 pub fn main() {
     let mut server = Arena::with_main_room("main_room", Box::new(MainRoom::new()));
 
-    /*let s = server.clone();
+    let s = server.clone();
+    let main_room = s.main_room().unwrap();
+
     thread::spawn(move || {
-        for i in 0..10 {
-            s.send(Message::OpenConnection(Connection::new()));
-            s.send(Message::MsgIn(format!("i:{}", i)));
+        for i in 0..2 {
+            let conn = Connection::new();
+            let conn_id = conn.id.clone();
+            s.send(Message::OpenConnection(conn));
+            s.send(Message::Msg(main_room.clone(), conn_id, "JODER".to_string()));
+            //s.send(Message::MsgIn(format!("i:{}", i)));
             thread::sleep_ms(100);
         }
-    });*/
+
+        s.send(Message::Broadcast(main_room, String::from("ok broadcast!!")));
+    });
 
     server.run();
 

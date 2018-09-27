@@ -25,13 +25,15 @@ lazy_static! {
 }
 
 type ConnId = String;
+type RoomId = String;
 
 #[derive(Debug)]
 pub enum Message {
     OpenConnection(Connection),
     DenyConection(ConnId, String),
     CloseConnection(String),
-    MsgIn(String),
+    Broadcast(RoomId, String), //room msg
+    Msg(RoomId, ConnId, String), //room, conn_id, msg
     MsgOut(String)
 }
 
@@ -83,8 +85,16 @@ pub fn get<F: FnOnce(&mut Arena)>(handler: F) {
     handler(&mut s);
 }
 
+#[derive(Debug, PartialEq)]
+enum ContainerState {
+    Initiating, 
+    Idle,
+    Destroyed,
+}
+
 #[derive(Debug)]
-struct RoomContainer {
+pub struct RoomContainer {
+    room_state: ContainerState,
     kind: String, 
     room: Room,
     state: Box<State>,
@@ -95,11 +105,20 @@ impl RoomContainer {
     pub fn new(id: &str, kind: &str, state: Box<State>, server: Arena) -> RoomContainer {
         let json_val = state.to_json();
         RoomContainer {
+            room_state: ContainerState::Initiating,
             kind: kind.to_string(),
             room: Room::new(id, kind, json_val),
             state: state,
             server: server,
         }
+    }
+
+    pub fn id(&self) -> String {
+        self.room.id()
+    }
+
+    pub fn is_full(&self) -> bool {
+        self.room.is_full()
     }
 
     pub fn add_connection(&mut self, conn: Connection) -> Result<(), String> {
@@ -111,16 +130,48 @@ impl RoomContainer {
         }
     }
 
+    fn sync(&mut self) {
+        println!("SYNC -> on container");
+        self.room.sync(&*self.state);
+    }
+
     pub fn on_open_connection(&mut self, id: &str) {
         self.state.on_open_connection(id, &mut self.room, &mut self.server);
+        self.sync();
     }
 
     pub fn on_init(&mut self) {
         self.state.on_init(&mut self.room, &mut self.server);
+        self.room_state = ContainerState::Idle;
     }
 
     pub fn on_destroy(&mut self) {
         self.state.on_destroy(&mut self.room, &mut self.server);
+        self.room_state = ContainerState::Destroyed;
+        //todo clear connections
+    }
+
+    pub fn on_broadcast(&mut self, msg: &str) {
+        if !self.is_idle() {
+            println!("Can't broadcast on container {}:{} because it's not idle yet.", self.kind, self.id());
+            return; 
+        }
+
+        self.state.on_broadcast(msg, &mut self.room, &mut self.server);
+    }
+
+    pub fn on_message(&mut self, conn_id: &str, msg: &str) {
+        if !self.is_idle() {
+            println!("Can't send a message on container {}:{} because it's not idle yet.", self.kind, self.id());
+            return; 
+        }
+
+        self.state.on_message(conn_id, msg, &mut self.room, &mut self.server);
+        //todo sync?
+    }
+
+    pub fn is_idle(&self) -> bool {
+        self.room_state == ContainerState::Idle
     }
 }
 
@@ -144,7 +195,7 @@ impl ContainerList {
             id = nanoid::simple();
         }
 
-        let mut list = self.list.entry(name.to_string()).or_insert(vec![]);
+        let list = self.list.entry(name.to_string()).or_insert(vec![]);
         list.push(id.clone());
 
         self.containers.insert(id.clone(), Arc::new(Mutex::new(RoomContainer::new(&id, name, state, server))));
@@ -200,8 +251,6 @@ impl ContainerList {
 #[derive(Debug, Clone)]
 pub struct Arena {
     main_room: Arc<RwLock<Option<String>>>,
-    containers: Arc<RwLock<HashMap<String, Arc<Mutex<RoomContainer>>>>>,
-
     list: Arc<RwLock<ContainerList>>,
 
     in_recv: channel::Receiver<Message>,
@@ -216,8 +265,6 @@ impl Arena {
 
         Arena {
             main_room: Arc::new(RwLock::new(None)),
-            containers: Arc::new(RwLock::new(HashMap::new())),
-
             list: Arc::new(RwLock::new(ContainerList::new())),
 
             in_recv: in_recv,
@@ -254,15 +301,37 @@ impl Arena {
     }
 
     pub fn run(&mut self) {
+        use Message::*;
+        
         for msg in &self.in_recv {
             println!("{:?}", msg);
             //handle messages
             match msg {
-                Message::OpenConnection(conn) => {
+                OpenConnection(conn) => {
                     if let Err(e) = self.add_connection(conn) {
                         println!("Err: {}", e); //todo deny?
                     }
                 },
+                Broadcast(room_id, msg) => {
+                    match self.list.read().get(&room_id) {
+                        Some(c) => {
+                            c.lock().on_broadcast(&msg);
+                        },
+                        None => {
+                            println!("Invalid room id {} to broadcast", room_id);
+                        }
+                    }
+                },
+                Msg(room_id, conn_id, msg) => {
+                    match self.list.read().get(&room_id) {
+                        Some(c) => {
+                            c.lock().on_message(&conn_id, &msg);
+                        },
+                        None => {
+                            println!("Invalid room id {} to send message", room_id);
+                        }
+                    }
+                }
                 _ => ()
             }
         }
@@ -276,16 +345,10 @@ impl Arena {
         if !self.list.read().contains(id) {
             Err(format!("Not found the room {}", id))
         } else {
+            println!("Setting as main_room {}", id);
             *self.main_room.write() = Some(id.to_string());
             Ok(())
         }
-
-        /*if !self.containers.read().contains_key(name) {
-            return Err(format!("Not found the room {}", name));
-        }
-
-        self.main_room.write() = Some(name.to_string());
-        Ok(())*/
     }
 
     fn add_connection(&mut self, conn: Connection) -> Result<(), String> {
@@ -296,10 +359,8 @@ impl Arena {
         }
     }
 
-    pub fn add_connection_to(&mut self, room: &str, conn: Connection) -> Result<(), String> {
-        let opt_container = self.containers.read().get(room)
-            .map(|c| c.clone());
-
+    pub fn add_connection_to(&mut self, id: &str, conn: Connection) -> Result<(), String> {
+        let opt_container = self.list.read().get(id);
         match opt_container {
             Some(c) => {
                 let mut container = c.lock();
@@ -310,27 +371,15 @@ impl Arena {
 
                 Ok(())
             },
-            _ => Err(format!("Room {} doesn't exists.", room))
+            _ => Err(format!("Room {} doesn't exists.", id))
         }
     }
 
     pub fn add(&mut self, name: &str, state: Box<State>) -> Result<String, String> {
-        /*{
-            let mut containers = self.containers.write();
-            if containers.contains_key(name) {
-                return Err(format!("The room '{}' already exists.", name));
-            }
-
-            let server = self.clone();
-            containers.insert(name.to_string(), Arc::new(Mutex::new(RoomContainer::new(name, state, server))));
-        }*/
         let s = self.clone();
         let id = self.list.write().add(name, state, s)?;
 
-        //clone the container reference to dispatch events without 
-        //block the thread reading the container's list
-        /*let opt_container = self.containers.read().get(name)
-            .map(|c| c.clone());*/
+        println!("Added a new room {}:{}", name, id);
 
         let opt_container = self.list.read().get(&id);
         match opt_container {
@@ -342,20 +391,35 @@ impl Arena {
     }
 
     pub fn remove(&mut self, id: &str) -> Result<(), String> {
-        /*let c = self.containers.write().remove(name);
-        match c {
-            Some(c) => {
-                let mut container = c.lock();
-                container.on_destroy();
-                Ok(())
-            },
-            _ => Err("Invalid name.".to_string())
-        }*/
-
         let container = self.list.write().remove(id)?;
         container.lock().on_destroy();
 
+        println!("Removed room {}", id);
+
         Ok(())
+    }
+
+    pub fn get_ids_by_kind(&self, kind: &str) -> Option<Vec<String>> {
+        self.list.read().get_ids_by_kind(kind)
+    }
+
+    pub fn get_rooms_by_kind(&self, kind: &str) -> Vec<Arc<Mutex<RoomContainer>>> {
+        let list = self.list.read();
+        let mut rooms = vec![];
+        match list.get_ids_by_kind(kind) {
+            Some(ids) => {
+                for id in ids {
+                    if let Some(container) = list.containers.get(&id) {
+                        rooms.push(container.clone());
+                    } else {
+                        println!("Invalid container id {}", id);
+                    }
+                }
+            },
+            None => { println!("Invalid kind {} requested", kind); }
+        }
+
+        rooms
     }
 }
 
@@ -385,6 +449,12 @@ impl Room {
         }
     }
 
+    fn sync_conn(&self, id: &str, state: &State) {
+        let s = state.to_sync(id);
+         println!("# Syncronizating {} - state {}", id, s);
+        //todo sync connection
+    }
+
     pub fn set_max_connections(&mut self, amount: usize) {
         self.max_connections = Some(amount);
     }
@@ -405,6 +475,10 @@ impl Room {
         }
     }
 
+    pub fn connections_len(&self) -> usize {
+        self.connections.len()
+    } 
+
     fn add_conn(&mut self, conn: Connection) {
         println!("connection {} added on room: {}:{}", conn.id, self.kind, self.id);
         //todo check collision?
@@ -422,10 +496,6 @@ impl Room {
         //notify state
     }
 
-    pub fn sync_connection(&mut self, _state: &State) {
-        //todo
-    }
-
     pub fn kind(&self) -> String {
         self.kind.clone()
     }
@@ -437,12 +507,25 @@ impl Room {
     pub fn sync(&mut self, state: &State) {
         let current = state.to_json();
         let changes = diff(self.states.last().unwrap_or(&current), &current);
+        
+        println!("changes {:?}", changes);
+        match &changes {
+            json_patch::Patch(c) => {
+                if c.len() == 0 {
+                    return;
+                }
+            }
+        }
 
         if self.states.len() >= self.state_limit {
             self.states.remove(0);
         }
 
         self.states.push(current);
+
+        for (id, _) in &self.connections {
+            self.sync_conn(&id, state);
+        }
 
         //todo notifiy changes to the connections
         println!("sync {} {}", self.id, json!(changes));
@@ -452,7 +535,7 @@ impl Room {
 
 #[derive(Debug, Clone)]
 pub struct Connection {
-    id: String
+    pub id: String
 }
 
 impl Connection {
@@ -481,6 +564,14 @@ pub trait State: Downcast + Send + Sync + std::fmt::Debug {
         println!("on destroy {}:{}", room.kind(), room.id());
     }
 
+    fn on_message(&mut self, conn_id: &str, msg: &str, room: &mut Room, _server: &mut Arena) {
+        println!("on message {}:{} conn: {} msg: {}", room.kind(), room.id(), conn_id, msg);
+    }
+
+    fn on_broadcast(&mut self, msg: &str, room: &mut Room, _server: &mut Arena) {
+        println!("on broadcast {}:{} msg: {}", room.kind(), room.id(), msg);
+    }
+
     fn on_update(&mut self, room: &mut Room, _server: &mut Arena) {
         println!("on update {}:{}", room.kind(), room.id());
     }
@@ -489,8 +580,8 @@ pub trait State: Downcast + Send + Sync + std::fmt::Debug {
         println!("on open connection [{}] {}:{}", connection_id, room.kind(), room.id());
     }
 
-    fn before_sync(&mut self, _conn: &mut Connection, _room: &mut Room, _server: &mut Arena) -> JsonValue {
-        json!({})
+    fn to_sync(&self, _conn_id: &str) -> JsonValue {
+        self.to_json()
     }
 }
 
