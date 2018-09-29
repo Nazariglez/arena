@@ -6,7 +6,7 @@ extern crate serde;
 #[macro_use] extern crate log;
 extern crate env_logger;
 
-use arena_core::{Arena, State, Room, JsonValue, Message, Connection, EmptyState};
+use arena_core::{Arena, State, Room, JsonValue, RoomEvents, Connection, Message, EmptyState};
 use std::thread;
 
 #[derive(Debug, Serialize)]
@@ -27,7 +27,7 @@ impl State for MainRoom {
         self.to_json()
     }
 
-    fn on_open_connection(&mut self, conn: &str, room: &mut Room, server: &mut Arena) {
+    fn on_connect(&mut self, conn: &str, room: &mut Room, server: &mut Arena) {
         println!("on open connection [{}] {}:{}", conn, room.kind(), room.id());
         //find a waiting room or create one
         let room_id = {
@@ -58,6 +58,15 @@ impl State for MainRoom {
                 }
             },
             _ => ()
+        }
+    }
+
+    fn on_message(&mut self, conn_id: &str, msg: &Message, room: &mut Room, _server: &mut Arena) {
+        match msg.event.as_ref() {
+            "input" => {
+                println!("input {}", msg.data); 
+            },
+            _ => {}
         }
     }
 }
@@ -109,7 +118,7 @@ impl State for GameRoom {
         room.set_max_connections(2);
     }
 
-    fn on_open_connection(&mut self, connection_id: &str, room: &mut Room, _server: &mut Arena) {
+    fn on_connect(&mut self, connection_id: &str, room: &mut Room, _server: &mut Arena) {
         self.players.push(connection_id.to_string());
 
         if self.players.len() == 2 {
@@ -127,16 +136,19 @@ pub fn main() {
     let main_room = s.main_room().unwrap();
 
     thread::spawn(move || {
+        use RoomEvents::*;
+
         for i in 0..2 {
             let conn = Connection::new();
             let conn_id = conn.id.clone();
-            s.send(Message::OpenConnection(conn));
-            s.send(Message::Msg(main_room.clone(), conn_id, "JODER".to_string()));
+            s.send(OpenConnection(conn));
+            s.send(Msg(main_room.clone(), conn_id.clone(), Message::new("test", "Yeah!!")));
+            s.send(Msg(main_room.clone(), conn_id, Message::new("input", "Yeah!!")));
             //s.send(Message::MsgIn(format!("i:{}", i)));
             thread::sleep_ms(100);
         }
 
-        s.send(Message::Broadcast(main_room, String::from("ok broadcast!!")));
+        s.send(Broadcast(main_room, Message::new("teeeest", "nope")));
     });
 
     server.run();

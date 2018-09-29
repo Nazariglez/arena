@@ -28,21 +28,35 @@ type ConnId = String;
 type RoomId = String;
 
 #[derive(Debug)]
-pub enum Message {
+pub struct Message {
+    pub event: String,
+    pub data: String
+}
+
+impl Message {
+    pub fn new(evt: &str, data: &str) -> Message {
+        Message {
+            event: evt.to_string(),
+            data: data.to_string()
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum RoomEvents {
     OpenConnection(Connection),
-    DenyConection(ConnId, String),
     CloseConnection(String),
-    Broadcast(RoomId, String), //room msg
-    Msg(RoomId, ConnId, String), //room, conn_id, msg
+    Broadcast(RoomId, Message), //room msg
+    Msg(RoomId, ConnId, Message), //room, conn_id, msg
     MsgOut(String)
 }
 
 #[derive(Debug, Clone)]
 pub struct ArenaBridge {
-    in_recv: channel::Receiver<Message>,
-    in_send: channel::Sender<Message>,
-    out_recv: channel::Receiver<Message>,
-    out_send: channel::Sender<Message>
+    in_recv: channel::Receiver<RoomEvents>,
+    in_send: channel::Sender<RoomEvents>,
+    out_recv: channel::Receiver<RoomEvents>,
+    out_send: channel::Sender<RoomEvents>
 }
 
 impl ArenaBridge {
@@ -58,19 +72,19 @@ impl ArenaBridge {
         }
     }
 
-    pub fn send(&self, msg: Message) {
+    pub fn send(&self, msg: RoomEvents) {
         self.in_send.send(msg);
     }
 
-    pub fn listen(&self) -> &channel::Receiver<Message> {
+    pub fn listen(&self) -> &channel::Receiver<RoomEvents> {
         &self.out_recv
     }
 
-    pub fn queue_msg(&self, msg: Message) {
+    pub fn queue_msg(&self, msg: RoomEvents) {
         self.out_send.send(msg);
     }
 
-    pub fn run<F: Fn(Message)>(&self, handler: F) {
+    pub fn run<F: Fn(RoomEvents)>(&self, handler: F) {
         for msg in &self.in_recv {
             println!("{:?}", msg);
             handler(msg);
@@ -125,8 +139,17 @@ impl RoomContainer {
         if self.room.is_full() {
             Err("Room full of connections.".to_string())
         } else {
-            self.room.add_conn(conn);
-            Ok(())
+            let id = conn.id.clone();
+            self.room.add_conn(conn, &*self.state)
+                .map_err(move |e| format!("Room: {}, Connection: {} -> {}", self.id(), id, e))
+        }
+    }
+
+    pub fn remove_connection(&mut self, conn_id: &str) {
+        if self.room.connections.contains_key(conn_id) {
+            self.state.on_disconnect(conn_id, &mut self.room, &mut self.server);
+            self.room.remove_conn(conn_id);
+            self.room.sync(&*self.state);
         }
     }
 
@@ -136,7 +159,7 @@ impl RoomContainer {
     }
 
     pub fn on_open_connection(&mut self, id: &str) {
-        self.state.on_open_connection(id, &mut self.room, &mut self.server);
+        self.state.on_connect(id, &mut self.room, &mut self.server);
         self.sync();
     }
 
@@ -151,7 +174,7 @@ impl RoomContainer {
         //todo clear connections
     }
 
-    pub fn on_broadcast(&mut self, msg: &str) {
+    pub fn on_broadcast(&mut self, msg: &Message) {
         if !self.is_idle() {
             println!("Can't broadcast on container {}:{} because it's not idle yet.", self.kind, self.id());
             return; 
@@ -160,7 +183,7 @@ impl RoomContainer {
         self.state.on_broadcast(msg, &mut self.room, &mut self.server);
     }
 
-    pub fn on_message(&mut self, conn_id: &str, msg: &str) {
+    pub fn on_message(&mut self, conn_id: &str, msg: &Message) {
         if !self.is_idle() {
             println!("Can't send a message on container {}:{} because it's not idle yet.", self.kind, self.id());
             return; 
@@ -202,6 +225,7 @@ impl ContainerList {
 
         Ok(id.to_owned())
     }
+    
 
     pub fn contains(&self, id: &str) -> bool {
         self.containers.contains_key(id)
@@ -253,8 +277,8 @@ pub struct Arena {
     main_room: Arc<RwLock<Option<String>>>,
     list: Arc<RwLock<ContainerList>>,
 
-    in_recv: channel::Receiver<Message>,
-    in_send: channel::Sender<Message>,
+    in_recv: channel::Receiver<RoomEvents>,
+    in_send: channel::Sender<RoomEvents>,
 
     pub bridge: ArenaBridge
 }
@@ -296,12 +320,12 @@ impl Arena {
         self.list.read().room_len_by_kind(id)
     }
 
-    pub fn send(&self, msg:Message) {
+    pub fn send(&self, msg:RoomEvents) {
         self.in_send.send(msg);
     }
 
     pub fn run(&mut self) {
-        use Message::*;
+        use RoomEvents::*;
         
         for msg in &self.in_recv {
             println!("{:?}", msg);
@@ -309,8 +333,11 @@ impl Arena {
             match msg {
                 OpenConnection(conn) => {
                     if let Err(e) = self.add_connection(conn) {
-                        println!("Err: {}", e); //todo deny?
+                        println!("Err: {}", e);
                     }
+                },
+                CloseConnection(id) => {
+                    self.remove_connection(&id);
                 },
                 Broadcast(room_id, msg) => {
                     match self.list.read().get(&room_id) {
@@ -356,6 +383,14 @@ impl Arena {
         match main {
             Some(m) => self.add_connection_to(&m, conn),
             _ => Err("Not found a main room.".to_string())
+        }
+    }
+
+    fn remove_connection(&mut self, conn_id: &str) {
+        let list = self.list.read();
+        for (_, c) in &list.containers {
+            let mut container = c.lock();
+            container.remove_connection(conn_id);
         }
     }
 
@@ -479,21 +514,24 @@ impl Room {
         self.connections.len()
     } 
 
-    fn add_conn(&mut self, conn: Connection) {
+    fn add_conn(&mut self, conn: Connection, state: &State) -> Result<(), String> {
+        state.validate_connection(&conn)?;
+
         println!("connection {} added on room: {}:{}", conn.id, self.kind, self.id);
         //todo check collision?
         let id = conn.id.clone();
         self.connections.insert(id, conn);
         //notifiy state
+
+        Ok(())
     }
 
     pub fn get_conn(&mut self, id: &str) -> Option<&mut Connection> {
         self.connections.get_mut(id)
     }
 
-    fn remove_conn(&mut self, id: String) {
-        self.connections.remove(&id);
-        //notify state
+    fn remove_conn(&mut self, id: &str) {
+        self.connections.remove(id);
     }
 
     pub fn kind(&self) -> String {
@@ -564,20 +602,28 @@ pub trait State: Downcast + Send + Sync + std::fmt::Debug {
         println!("on destroy {}:{}", room.kind(), room.id());
     }
 
-    fn on_message(&mut self, conn_id: &str, msg: &str, room: &mut Room, _server: &mut Arena) {
-        println!("on message {}:{} conn: {} msg: {}", room.kind(), room.id(), conn_id, msg);
+    fn on_message(&mut self, conn_id: &str, msg: &Message, room: &mut Room, _server: &mut Arena) {
+        println!("on message {}:{} conn: {} msg: {:?}", room.kind(), room.id(), conn_id, msg);
     }
 
-    fn on_broadcast(&mut self, msg: &str, room: &mut Room, _server: &mut Arena) {
-        println!("on broadcast {}:{} msg: {}", room.kind(), room.id(), msg);
+    fn on_broadcast(&mut self, msg: &Message, room: &mut Room, _server: &mut Arena) {
+        println!("on broadcast {}:{} msg: {:?}", room.kind(), room.id(), msg);
     }
 
     fn on_update(&mut self, room: &mut Room, _server: &mut Arena) {
         println!("on update {}:{}", room.kind(), room.id());
     }
 
-    fn on_open_connection(&mut self, connection_id: &str, room: &mut Room, _server: &mut Arena) {
-        println!("on open connection [{}] {}:{}", connection_id, room.kind(), room.id());
+    fn on_connect(&mut self, connection_id: &str, room: &mut Room, _server: &mut Arena) {
+        println!("on connect [{}] {}:{}", connection_id, room.kind(), room.id());
+    }
+
+    fn on_disconnect(&mut self, connection_id: &str, room: &mut Room, _server: &mut Arena) {
+        println!("on connect [{}] {}:{}", connection_id, room.kind(), room.id());
+    }
+
+    fn validate_connection(&self, _connection: &Connection) -> Result<(), String> {
+        Ok(())
     }
 
     fn to_sync(&self, _conn_id: &str) -> JsonValue {
