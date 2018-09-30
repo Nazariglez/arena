@@ -19,13 +19,48 @@ use crossbeam_channel as channel;
 
 pub use serde_json::{Value as JsonValue};
 
-lazy_static! {
-    static ref SERVER: Arc<RwLock<Arena>> = Arc::new(RwLock::new(Arena::new()));
-    static ref BRIGE: ArenaBridge = ArenaBridge::new();
-}
-
 type ConnId = String;
 type RoomId = String;
+
+trait Adapter {
+
+}
+
+struct Client {
+
+}
+
+pub struct LocalClient {
+    server: Arena,
+}
+
+impl LocalClient {
+    pub fn new(server: Arena) -> LocalClient {
+        let mut s = server.clone();
+        
+        let client = LocalClient {
+            server: server
+        };
+
+        std::thread::spawn(move || {
+            loop {
+                match s.listen_events() {
+                    Some(evt) => {
+                        println!("- CLIENT EVENT = {:?}", evt)
+                    },
+                    None => {
+                        break;
+                    }
+                }
+            }
+
+            println!(" # - # - # CLIENT LOOP BREAKED # - # - #");
+        });
+
+        client
+    }
+}
+
 
 #[derive(Debug)]
 pub struct Message {
@@ -43,61 +78,25 @@ impl Message {
 }
 
 #[derive(Debug)]
+pub enum ClientEvents {
+    OpenConnection(ConnId),
+    CloseConnection(ConnId, String), //id reason
+    JoinRoom(RoomId, ConnId, Option<String>), //roomid, connid, error?
+    CloseRoom(RoomId, ConnId, String), //roomid, connid, reason
+    Msg(RoomId, ConnId, Message)
+}
+
+#[derive(Debug)]
 pub enum RoomEvents {
     OpenConnection(Connection),
-    CloseConnection(String),
+    CloseConnection(ConnId),
+    JoinRoom(RoomId, ConnId),
+    CloseRoom(RoomId, ConnId),
     Broadcast(RoomId, Message), //room msg
     Msg(RoomId, ConnId, Message), //room, conn_id, msg
-    MsgOut(String)
 }
 
-#[derive(Debug, Clone)]
-pub struct ArenaBridge {
-    in_recv: channel::Receiver<RoomEvents>,
-    in_send: channel::Sender<RoomEvents>,
-    out_recv: channel::Receiver<RoomEvents>,
-    out_send: channel::Sender<RoomEvents>
-}
-
-impl ArenaBridge {
-    fn new() -> ArenaBridge {
-        let (in_send, in_recv) = channel::bounded(0);
-        let (out_send, out_recv) = channel::bounded(0);
-
-        ArenaBridge {
-            in_recv: in_recv,
-            in_send: in_send,
-            out_recv: out_recv,
-            out_send: out_send
-        }
-    }
-
-    pub fn send(&self, msg: RoomEvents) {
-        self.in_send.send(msg);
-    }
-
-    pub fn listen(&self) -> &channel::Receiver<RoomEvents> {
-        &self.out_recv
-    }
-
-    pub fn queue_msg(&self, msg: RoomEvents) {
-        self.out_send.send(msg);
-    }
-
-    pub fn run<F: Fn(RoomEvents)>(&self, handler: F) {
-        for msg in &self.in_recv {
-            println!("{:?}", msg);
-            handler(msg);
-        }
-    }
-}
-
-//todo rename to octopus? or other thing because arena seems to be already used
-
-pub fn get<F: FnOnce(&mut Arena)>(handler: F) {
-    let mut s = SERVER.write();
-    handler(&mut s);
-}
+//todo rename to octopus, hive? or other thing because arena seems to be already used
 
 #[derive(Debug, PartialEq)]
 enum ContainerState {
@@ -149,17 +148,21 @@ impl RoomContainer {
         if self.room.connections.contains_key(conn_id) {
             self.state.on_disconnect(conn_id, &mut self.room, &mut self.server);
             self.room.remove_conn(conn_id);
-            self.room.sync(&*self.state);
+            //todo sent to client closeClient?
+            self.server.dispatch_to_client(ClientEvents::CloseRoom(self.room.id(), conn_id.to_string(), "".to_string()));
+            self.sync();
         }
     }
 
     fn sync(&mut self) {
         println!("SYNC -> on container");
-        self.room.sync(&*self.state);
+        self.room.sync(&*self.state, &self.server);
     }
 
-    pub fn on_open_connection(&mut self, id: &str) {
+    pub fn on_connect(&mut self, id: &str) {
+        println!("      # OK AQUI ESTOY");
         self.state.on_connect(id, &mut self.room, &mut self.server);
+        self.server.dispatch_to_client(ClientEvents::JoinRoom(self.room.id(), id.to_string(), None));
         self.sync();
     }
 
@@ -181,6 +184,7 @@ impl RoomContainer {
         }
 
         self.state.on_broadcast(msg, &mut self.room, &mut self.server);
+        self.sync();
     }
 
     pub fn on_message(&mut self, conn_id: &str, msg: &Message) {
@@ -190,6 +194,7 @@ impl RoomContainer {
         }
 
         self.state.on_message(conn_id, msg, &mut self.room, &mut self.server);
+        self.sync();
         //todo sync?
     }
 
@@ -274,28 +279,42 @@ impl ContainerList {
 
 #[derive(Debug, Clone)]
 pub struct Arena {
-    main_room: Arc<RwLock<Option<String>>>,
+    main_room: Arc<RwLock<Option<RoomId>>>,
     list: Arc<RwLock<ContainerList>>,
+    connections: Arc<RwLock<HashMap<ConnId, Connection>>>,
 
     in_recv: channel::Receiver<RoomEvents>,
     in_send: channel::Sender<RoomEvents>,
 
-    pub bridge: ArenaBridge
+    client_recv: channel::Receiver<ClientEvents>,
+    client_send: channel::Sender<ClientEvents>,
 }
 
 impl Arena {
     pub fn new() -> Arena {
         let (in_send, in_recv) = channel::unbounded();
+        let (client_send, client_recv) = channel::unbounded();
 
         Arena {
             main_room: Arc::new(RwLock::new(None)),
             list: Arc::new(RwLock::new(ContainerList::new())),
 
+            connections: Arc::new(RwLock::new(HashMap::new())),
+
             in_recv: in_recv,
             in_send: in_send,
 
-            bridge: ArenaBridge::new()
+            client_recv: client_recv,
+            client_send: client_send,
         }
+    }
+
+    pub fn dispatch_to_client(&self, evt: ClientEvents) {
+        self.client_send.send(evt);
+    }
+
+    pub fn listen_events(&mut self) -> Option<ClientEvents> {
+        self.client_recv.next()
     }
 
     pub fn with_main_room(name: &str, state: Box<State>) -> Arena {
@@ -332,12 +351,44 @@ impl Arena {
             //handle messages
             match msg {
                 OpenConnection(conn) => {
-                    if let Err(e) = self.add_connection(conn) {
-                        println!("Err: {}", e);
+                    {
+                        let id = conn.id.clone();
+                        let mut conns = self.connections.write();
+                        if conns.contains_key(&id) {
+                            self.dispatch_to_client(ClientEvents::CloseConnection(id.clone(), "Duplicated connection id.".to_string()));
+                            return;
+                        }
+
+                        conns.insert(id.clone(), conn.clone());
+                        self.dispatch_to_client(ClientEvents::OpenConnection(id.clone()));
+                    }
+
+                    match self.add_connection_to_main(conn) {
+                        Err(e) => {
+                            println!("Err: {}", e);
+                            //self.dispatch_to_client(ClientEvents::CloseConnection(id, e));
+                        },
+                        _ => {}
                     }
                 },
                 CloseConnection(id) => {
                     self.remove_connection(&id);
+                    self.dispatch_to_client(ClientEvents::CloseConnection(id, "".to_string()));
+                },
+                JoinRoom(room_id, conn_id) => {
+                    let opt_conn = self.connections.read().get(&conn_id)
+                        .map(|conn| conn.clone());
+
+                    match opt_conn {
+                        Some(conn) => {
+                            if let Err(e) = self.add_connection_to(&room_id, conn) {
+                                self.dispatch_to_client(ClientEvents::JoinRoom(room_id, conn_id.clone(), Some(e)));
+                            }
+                        },
+                        None => {
+                            self.dispatch_to_client(ClientEvents::JoinRoom(room_id, conn_id.clone(), Some(format!("Invalid connection id: {}", conn_id))));
+                        }
+                    }
                 },
                 Broadcast(room_id, msg) => {
                     match self.list.read().get(&room_id) {
@@ -378,7 +429,7 @@ impl Arena {
         }
     }
 
-    fn add_connection(&mut self, conn: Connection) -> Result<(), String> {
+    fn add_connection_to_main(&mut self, conn: Connection) -> Result<(), String> {
         let main = self.main_room.read().clone();
         match main {
             Some(m) => self.add_connection_to(&m, conn),
@@ -402,7 +453,7 @@ impl Arena {
 
                 let id = conn.id.clone();
                 container.add_connection(conn)?;
-                container.on_open_connection(&id);
+                container.on_connect(&id);
 
                 Ok(())
             },
@@ -484,9 +535,10 @@ impl Room {
         }
     }
 
-    fn sync_conn(&self, id: &str, state: &State) {
-        let s = state.to_sync(id);
-         println!("# Syncronizating {} - state {}", id, s);
+    fn sync_conn(&self, id: &str, state: &State, server: &Arena) {
+        let data = state.to_sync(id);
+         println!("# Syncronizating {} - state {}", id, data);
+         server.dispatch_to_client(ClientEvents::Msg(self.id(), id.to_string(), Message::new("sync", &data.to_string())));
         //todo sync connection
     }
 
@@ -542,7 +594,7 @@ impl Room {
         self.id.clone()
     }
 
-    pub fn sync(&mut self, state: &State) {
+    pub fn sync(&mut self, state: &State, server: &Arena) {
         let current = state.to_json();
         let changes = diff(self.states.last().unwrap_or(&current), &current);
         
@@ -562,11 +614,11 @@ impl Room {
         self.states.push(current);
 
         for (id, _) in &self.connections {
-            self.sync_conn(&id, state);
+            self.sync_conn(&id, state, server);
         }
 
         //todo notifiy changes to the connections
-        println!("sync {} {}", self.id, json!(changes));
+        //println!("sync {} {}", self.id, json!(changes));
     }
 }
 

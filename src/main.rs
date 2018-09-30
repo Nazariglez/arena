@@ -6,7 +6,7 @@ extern crate serde;
 #[macro_use] extern crate log;
 extern crate env_logger;
 
-use arena_core::{Arena, State, Room, JsonValue, RoomEvents, Connection, Message, EmptyState};
+use arena_core::{LocalClient, Arena, State, Room, JsonValue, RoomEvents, Connection, Message, EmptyState};
 use std::thread;
 
 #[derive(Debug, Serialize)]
@@ -61,13 +61,15 @@ impl State for MainRoom {
         }
     }
 
-    fn on_message(&mut self, conn_id: &str, msg: &Message, room: &mut Room, _server: &mut Arena) {
-        match msg.event.as_ref() {
+    fn on_message(&mut self, conn_id: &str, msg: &Message, _room: &mut Room, server: &mut Arena) {
+        /*match msg.event.as_ref() {
             "input" => {
                 println!("input {}", msg.data); 
             },
             _ => {}
-        }
+        }*/
+
+        
     }
 }
 
@@ -132,13 +134,14 @@ impl State for GameRoom {
 pub fn main() {
     let mut server = Arena::with_main_room("main_room", Box::new(MainRoom::new()));
 
+    let client = LocalClient::new(server.clone());
+
     let s = server.clone();
     let main_room = s.main_room().unwrap();
-
     thread::spawn(move || {
         use RoomEvents::*;
 
-        for i in 0..2 {
+        for i in 0..1 {
             let conn = Connection::new();
             let conn_id = conn.id.clone();
             s.send(OpenConnection(conn));
