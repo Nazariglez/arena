@@ -30,7 +30,22 @@ struct Client {
 
 }
 
+struct InnerClient {
+    id: String,
+    rooms: HashMap<String, JsonValue>
+}
+
+impl InnerClient {
+    fn new() -> InnerClient {
+        InnerClient {
+            id: "".to_string(),
+            rooms: HashMap::new()
+        }
+    }
+}
+
 pub struct LocalClient {
+    inner: Arc<RwLock<InnerClient>>,
     server: Arena,
 }
 
@@ -39,6 +54,7 @@ impl LocalClient {
         let mut s = server.clone();
         
         let client = LocalClient {
+            inner: Arc::new(RwLock::new(InnerClient::new())),
             server: server
         };
 
@@ -46,7 +62,15 @@ impl LocalClient {
             loop {
                 match s.listen_events() {
                     Some(evt) => {
-                        println!("- CLIENT EVENT = {:?}", evt)
+                        println!("    - - - - - - - - - - - - CLIENT EVENT = {:?}", evt);
+                        match evt {
+                            ClientEvents::Msg(_, _, msg) => {
+                                if msg.event == "sync" {
+                                    println!("\\\\ CLIENT SYNC -> {:?}", msg.data);
+                                }
+                            },
+                            _ => {}
+                        } 
                     },
                     None => {
                         break;
@@ -514,7 +538,8 @@ pub struct Room {
     id: String,
     kind: String,
     max_connections: Option<usize>,
-    connections: HashMap<String, Connection>,
+    connections: HashMap<String, (Connection, Vec<JsonValue>)>,
+    //connection_states: HashMap<String, Vec<JsonValue>>,
     states: Vec<JsonValue>,
     state_limit: usize
 }
@@ -530,6 +555,7 @@ impl Room {
             kind: kind.to_string(),
             max_connections: None,
             connections: HashMap::new(),
+            //connection_states: HashMap::new(),
             states: vec![state],
             state_limit: state_limit,
         }
@@ -537,6 +563,12 @@ impl Room {
 
     fn sync_conn(&self, id: &str, state: &State, server: &Arena) {
         let data = state.to_sync(id);
+        /*match self.connections.get_mut(id) {
+            Some((_, states)) => {
+
+            },
+            None => {}
+        }*/
          println!("# Syncronizating {} - state {}", id, data);
          server.dispatch_to_client(ClientEvents::Msg(self.id(), id.to_string(), Message::new("sync", &data.to_string())));
         //todo sync connection
@@ -572,14 +604,14 @@ impl Room {
         println!("connection {} added on room: {}:{}", conn.id, self.kind, self.id);
         //todo check collision?
         let id = conn.id.clone();
-        self.connections.insert(id, conn);
+        self.connections.insert(id, (conn, vec![]));
         //notifiy state
 
         Ok(())
     }
 
     pub fn get_conn(&mut self, id: &str) -> Option<&mut Connection> {
-        self.connections.get_mut(id)
+        self.connections.get_mut(id).map(|(c, _)| c)
     }
 
     fn remove_conn(&mut self, id: &str) {
@@ -596,7 +628,7 @@ impl Room {
 
     pub fn sync(&mut self, state: &State, server: &Arena) {
         let current = state.to_json();
-        let changes = diff(self.states.last().unwrap_or(&current), &current);
+        let changes = diff(self.states.last().unwrap_or(&json!({})), &current);
         
         println!("changes {:?}", changes);
         match &changes {
@@ -613,8 +645,26 @@ impl Room {
 
         self.states.push(current);
 
-        for (id, _) in &self.connections {
-            self.sync_conn(&id, state, server);
+        for (id, (_, conn_states)) in &mut self.connections {
+            //self.sync_conn(&id, state, server);
+            let data = state.to_sync(id);
+            let diff = diff(conn_states.last().unwrap_or(&json!({})), &data);
+
+            match diff {
+                json_patch::Patch(changes) => {
+                    if changes.len() != 0 {
+                        conn_states.push(data);
+
+                        if conn_states.len() >= self.state_limit {
+                            conn_states.remove(0);
+                        }
+
+                        let json_changes = json!(changes).to_string();
+                        println!("# Syncronizating {} - state {}", id, &json_changes);
+                        server.dispatch_to_client(ClientEvents::Msg(self.id.clone(), id.to_string(), Message::new("sync", &json_changes)));
+                    }
+                }
+            }
         }
 
         //todo notifiy changes to the connections

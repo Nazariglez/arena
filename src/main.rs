@@ -141,7 +141,7 @@ pub fn main() {
     thread::spawn(move || {
         use RoomEvents::*;
 
-        for i in 0..1 {
+        for i in 0..2 {
             let conn = Connection::new();
             let conn_id = conn.id.clone();
             s.send(OpenConnection(conn));
