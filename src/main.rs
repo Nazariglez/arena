@@ -6,7 +6,7 @@ extern crate serde;
 #[macro_use] extern crate log;
 extern crate env_logger;
 
-use arena_core::{LocalClient, Arena, State, Room, JsonValue, RoomEvents, Connection, Message, EmptyState};
+use arena_core::{ClientHandler, LocalClient, Arena, State, Room, JsonValue, RoomEvents, Connection, Message, EmptyState};
 use std::thread;
 
 #[derive(Debug, Serialize)]
@@ -130,29 +130,19 @@ impl State for GameRoom {
     }
 }
 
+struct ConnHandler;
+impl ClientHandler for ConnHandler {}
+
 
 pub fn main() {
     let mut server = Arena::with_main_room("main_room", Box::new(MainRoom::new()));
 
-    let client = LocalClient::new(server.clone());
-
     let s = server.clone();
-    let main_room = s.main_room().unwrap();
     thread::spawn(move || {
-        use RoomEvents::*;
-
-        for i in 0..2 {
-            let conn = Connection::new();
-            let conn_id = conn.id.clone();
-            s.send(OpenConnection(conn));
-            s.send(Msg(main_room.clone(), conn_id.clone(), Message::new("test", "Yeah!!")));
-            s.send(Msg(main_room.clone(), conn_id, Message::new("input", "Yeah!!")));
-            //s.send(Message::MsgIn(format!("i:{}", i)));
-            thread::sleep_ms(100);
-        }
-
-        s.send(Broadcast(main_room, Message::new("teeeest", "nope")));
+        let client1 = LocalClient::new(s.clone(), Box::new(ConnHandler));
+        let client2 = LocalClient::new(s, Box::new(ConnHandler));
     });
+
 
     server.run();
 

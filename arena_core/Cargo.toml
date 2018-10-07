@@ -14,4 +14,5 @@ nanoid = "0.2.0"
 crossbeam-channel = "0.2.5"
 parking_lot = "0.6.4"
 log = "0.4.5"
+rayon = "1.0.2"
 
