@@ -42,20 +42,40 @@ struct InnerClient {
     id: String,
     status: ClientStatus,
     rooms: HashMap<String, JsonValue>,
+    handler: Box<ClientHandler>
 }
 
 impl InnerClient {
-    fn new(id: &str) -> InnerClient {
+    fn new(id: &str, handler: Box<ClientHandler>) -> InnerClient {
         InnerClient {
             id: id.to_string(),
             status: ClientStatus::Disconnected,
             rooms: HashMap::new(),
+            handler: handler,
         }
     }
 }
 
 pub trait ClientHandler {
+    fn on_open_connection(&mut self){
+        println!("client on open connection");
+    }
 
+    fn on_close_connection(&mut self, reason: Option<String>) {
+        println!("client on close connection {:?}", reason);
+    }
+
+    fn on_reject_join(&mut self, id: &str, reason: &str) {
+        println!("client on reject join {}:{}", id, reason);
+    }
+
+    fn on_join_room(&mut self, id: &str) {
+        println!("client on join room {}", id);
+    }
+
+    fn on_sync(&mut self, room_id: &str, msg: &str) {
+        println!("on client sync {}", msg);
+    }
 }
 
 pub struct LocalClient {
@@ -72,7 +92,7 @@ impl LocalClient {
         match r_conn {
             Err(e) => panic!(e),
             Ok(conn) => {
-                let inner = Arc::new(RwLock::new(InnerClient::new(&conn.id)));
+                let inner = Arc::new(RwLock::new(InnerClient::new(&conn.id, manager)));
                 inner.write().status = ClientStatus::Connected;
 
                 let mut client = LocalClient {
@@ -82,6 +102,9 @@ impl LocalClient {
                 };
 
                 println!("Client connected!!!!");
+                client.inner.write()
+                    .handler.on_open_connection();
+
                 client.run();
 
                 client
@@ -100,6 +123,7 @@ impl LocalClient {
                 ClientEvents::Msg(room_id, msg) => {
                     if msg.event == "sync" {
                         println!("\\\\ CLIENT SYNC -> {:?}", msg.data);
+                        inner.write().handler.on_sync(&room_id, &msg.data);
                     }
                 },
                 ClientEvents::CloseConnection(reason) => {
@@ -107,11 +131,20 @@ impl LocalClient {
                     //todo change status
                     let mut c = inner.write();
                     c.status = ClientStatus::Disconnected;
+                    c.handler.on_close_connection(reason.clone());
                     break;
                 },
-                ClientEvents::JoinRoom(room_id, reason) => {
-                    let mut c = inner.write();
-                    c.rooms.insert(room_id.to_string(), json!({}));
+                ClientEvents::JoinRoom(room_id, opt_reason) => {
+                    match opt_reason {
+                        Some(reason) => {
+                            inner.write().handler.on_reject_join(&room_id, &reason);
+                        },
+                        None => {
+                            let mut c = inner.write();
+                            c.rooms.insert(room_id.to_string(), json!({}));
+                            c.handler.on_join_room(&room_id);
+                        }
+                    }
                 },
                 _ => {}
             } 
