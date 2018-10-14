@@ -4,15 +4,16 @@ version = "0.1.0"
 authors = ["Nazarí González <nazari.nz@gmail.com>"]
 
 [dependencies]
-serde = "1.0.76"
-serde_derive = "1.0.76"
-serde_json = "1.0.26"
+serde = "1.0.79"
+serde_derive = "1.0.79"
+serde_json = "1.0.32"
 lazy_static = "1.1.0"
 downcast-rs = "1.0.3"
 json-patch = "0.2.2"
 nanoid = "0.2.0"
-crossbeam-channel = "0.2.5"
+crossbeam-channel = "0.2.6"
 parking_lot = "0.6.4"
 log = "0.4.5"
 rayon = "1.0.2"
+failure = "0.1.2"
 

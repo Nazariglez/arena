@@ -4,6 +4,7 @@ extern crate nanoid;
 extern crate crossbeam_channel;
 extern crate parking_lot;
 extern crate rayon;
+#[macro_use] extern crate failure;
 #[macro_use] extern crate serde_derive;
 #[macro_use] extern crate serde_json;
 #[macro_use] extern crate lazy_static;
@@ -18,8 +19,19 @@ use parking_lot::{Mutex, RwLock};
 use json_patch::diff;
 use crossbeam_channel as channel;
 use rayon::prelude::*;
+use failure::Error;
 
 pub use serde_json::{Value as JsonValue};
+
+#[derive(Debug, Fail)]
+enum ArenaError {
+    #[fail(display = "unknow error: {}", reason)]
+    Unknow {
+        reason: String
+    }
+
+    //todo add errors
+}
 
 type ConnId = String;
 type RoomId = String;
@@ -73,7 +85,7 @@ pub trait ClientHandler {
         println!("client on join room {}", id);
     }
 
-    fn on_sync(&mut self, room_id: &str, msg: &str) {
+    fn on_sync(&mut self, room_id: &str, msg: &JsonValue) {
         println!("on client sync {}", msg);
     }
 }
@@ -156,20 +168,21 @@ impl LocalClient {
 #[derive(Debug)]
 pub struct Message {
     pub event: String,
-    pub data: String
+    pub data: JsonValue
 }
 
 impl Message {
-    pub fn new(evt: &str, data: &str) -> Message {
+    pub fn new(evt: &str, data: &JsonValue) -> Message {
         Message {
             event: evt.to_string(),
-            data: data.to_string()
+            data: data.clone()
         }
     }
 }
 
 #[derive(Debug)]
 pub enum ClientEvents {
+    OpenConnection(ConnId),
     CloseConnection(Option<String>), //reason?
     JoinRoom(RoomId, Option<String>), //roomid, error?
     CloseRoom(RoomId, String), //roomid, reason
@@ -401,6 +414,16 @@ impl Arena {
         }
     }
 
+    pub fn from_state() -> Arena {
+        //todo create arena from a saved state
+        unimplemented!()
+    }
+
+    pub fn to_state() -> JsonValue {
+        //todo save the state of the server to a string or json value
+        unimplemented!()
+    }
+
     pub fn dispatch_to_client(&self, evt: ClientEvents) {
         self.client_send.send(evt);
     }
@@ -447,6 +470,8 @@ impl Arena {
 
         let conn = Connection::with_id(&id);
         self.connections.write().insert(id, conn.clone());
+        conn.dispatch(ClientEvents::OpenConnection(conn.id.clone()));
+
         self.add_connection_to_main(conn.clone())?;
 
         Ok(conn)
@@ -528,7 +553,7 @@ impl Arena {
         }
     }
 
-    fn remove_connection(&mut self, conn_id: &str) {
+    pub fn remove_connection(&mut self, conn_id: &str) {
         let list = self.list.read();
         list.containers.par_iter()
             .for_each(|(_, c)|{
@@ -569,8 +594,9 @@ impl Arena {
     }
 
     pub fn remove(&mut self, id: &str) -> Result<(), String> {
+        //TODO FIXME deadlocks every time
         let container = self.list.write().remove(id)?;
-        container.lock().on_destroy();
+        //container.lock().on_destroy(); //todo fixme deadlock if it's called from a event on state
 
         println!("Removed room {}", id);
 
@@ -666,10 +692,9 @@ impl Room {
         state.validate_connection(&conn)?;
 
         println!("connection {} added on room: {}:{}", conn.id, self.kind, self.id);
-        //todo check collision?
+ 
         let id = conn.id.clone();
         self.connections.insert(id, (conn, vec![]));
-        //notifiy state
 
         Ok(())
     }
@@ -691,10 +716,10 @@ impl Room {
     }
 
     pub fn sync(&mut self, state: &State, server: &Arena) {
+        let empty_json = json!({});
         let current = state.to_json();
-        let changes = diff(self.states.last().unwrap_or(&json!({})), &current);
+        let changes = diff(self.states.last().unwrap_or(&empty_json), &current);
         
-        println!("changes {:?}", changes);
         match &changes {
             json_patch::Patch(c) => {
                 if c.len() == 0 {
@@ -711,7 +736,6 @@ impl Room {
 
         let limit = self.state_limit;
         let my_id = &self.id;
-        let empty_json = json!({});
         self.connections.par_iter_mut()
             .for_each(move |(id, (conn, conn_states))| {
                 let data = state.to_sync(id);
@@ -726,7 +750,7 @@ impl Room {
                                 conn_states.remove(0);
                             }
 
-                            let json_changes = json!(changes).to_string();
+                            let json_changes = json!(changes);
                             println!("# Syncronizating {} - state {}", id, &json_changes);
                             conn.dispatch(ClientEvents::Msg(my_id.to_string(), Message::new("sync", &json_changes)));
                         }
@@ -756,6 +780,10 @@ impl Connection {
             in_recv: in_recv,
             in_send: in_send
         }
+    }
+
+    pub fn listen(&self) -> &channel::Receiver<ClientEvents> {
+        &self.in_recv
     }
 
     fn dispatch(&self, evt:ClientEvents) {

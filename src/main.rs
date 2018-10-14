@@ -1,5 +1,6 @@
 extern crate arena_core;
 extern crate arena_net;
+extern crate arena_monitor;
 extern crate serde;
 #[macro_use] extern crate serde_derive;
 #[macro_use] extern crate serde_json;
@@ -26,6 +27,10 @@ impl State for MainRoom {
     fn to_sync(&self, _conn_id: &str) -> JsonValue {
         self.to_json()
     }
+
+    /*fn validate_connection(&self, c: &Connection) -> Result<(), String> {
+        Err("Pipi".to_string())
+    }*/
 
     fn on_connect(&mut self, conn: &str, room: &mut Room, server: &mut Arena) {
         println!("on open connection [{}] {}:{}", conn, room.kind(), room.id());
@@ -128,6 +133,11 @@ impl State for GameRoom {
             self.state = GameState::PlayingPlayer1;
         }
     }
+
+    fn on_disconnect(&mut self, conn_id: &str, room: &mut Room, server: &mut Arena) {
+        println!("on disconnect {}:{}", room.id(), conn_id);
+        //server.remove(&room.id());
+    }
 }
 
 struct ConnHandler;
@@ -135,16 +145,9 @@ impl ClientHandler for ConnHandler {}
 
 
 pub fn main() {
-    let mut server = Arena::with_main_room("main_room", Box::new(MainRoom::new()));
+    env_logger::init();
 
-    let s = server.clone();
-    thread::spawn(move || {
-        let client1 = LocalClient::new(s.clone(), Box::new(ConnHandler));
-        let client2 = LocalClient::new(s, Box::new(ConnHandler));
+    arena_net::run("127.0.0.1:8088", || {
+        Arena::with_main_room("main_room", Box::new(MainRoom::new()))
     });
-
-
-    server.run();
-
-    arena_net::run(8088);
 }

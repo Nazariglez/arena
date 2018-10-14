@@ -1,0 +1,8 @@
+[package]
+name = "arena_monitor"
+version = "0.1.0"
+authors = ["Nazarí González <nazari.nz@gmail.com>"]
+
+[dependencies]
+actix = "0.7.5"
+actix-web = "0.7.13"
